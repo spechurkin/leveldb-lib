@@ -10,7 +10,8 @@ root = Path(__file__).resolve().parents[2]
 build = Path(os.environ.get("ML_BUILD_DIR", root / "build")).resolve()
 environment = os.environ.copy()
 environment["ML_FIXTURE"] = str(root / "tests/fixtures/binary.tsv")
-environment["PERL5LIB"] = str(root / "bindings/perl/lib")
+environment["PERL5LIB"] = os.pathsep.join(
+    filter(None, [str(root / "bindings/perl/lib"), environment.get("PERL5LIB")]))
 environment["PYTHONPATH"] = os.pathsep.join(
     filter(None, [str(root / "bindings/python"), environment.get("PYTHONPATH")]))
 
