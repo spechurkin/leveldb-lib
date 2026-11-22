@@ -18,6 +18,3 @@ with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
         print(f"{key}={value}", file=output)
 with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as output:
     print(native, file=output)
-    gzip = Path("C:/Program Files/Git/usr/bin")
-    if os.name == "nt" and (gzip / "gzip.exe").exists():
-        print(gzip, file=output)

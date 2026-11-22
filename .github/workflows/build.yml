@@ -54,6 +54,7 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DML_BUILD_NODE=ON -DNODE_INCLUDE_DIR="${{ steps.node.outputs.include }}"
           -DNODE_LIBRARY="${{ steps.node.outputs.library }}"
+          ${{ runner.os == 'Windows' && '-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl' || '' }}
       - run: cmake --build build --parallel 4
       - run: python tools/ci_env.py
       - name: Configure cgo
@@ -102,7 +103,7 @@ jobs:
         run: |
           perl Makefile.PL
           perl -MConfig -e 'system($Config{make}, "test") == 0 or die "make test failed"'
-          perl -MConfig -e 'system($Config{make}, "dist") == 0 or die "make dist failed"'
+          perl -MConfig -e '$ENV{PATH} .= q(;C:/Program Files/Git/usr/bin) if $^O eq q(MSWin32); system($Config{make}, "dist") == 0 or die "make dist failed"'
       - name: Sequential cross-language integration
         if: matrix.perl
         run: python tests/integration/run.py
@@ -112,7 +113,7 @@ jobs:
       - run: cmake --install build --prefix build/install
       - name: Installed C and C++ consumers
         run: |
-          cmake -S tests/consumer -B build/consumer -G Ninja -DCMAKE_PREFIX_PATH="${{ github.workspace }}/build/install"
+          cmake -S tests/consumer -B build/consumer -G Ninja -DCMAKE_PREFIX_PATH="${{ github.workspace }}/build/install" ${{ runner.os == 'Windows' && '-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl' || '' }}
           cmake --build build/consumer
       - name: Native archive
         working-directory: build
