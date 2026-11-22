@@ -5,13 +5,12 @@
  * Use the matching prepared addon/shared library and await resource cleanup.
  */
 
-export {Database};
+import {Database} from './resources/database';
+import {Batch} from './resources/batch';
+import {Snapshot} from './resources/snapshot';
+import {Cursor} from './resources/cursor';
 
-export {Batch};
-
-export {Snapshot};
-
-export {Cursor};
+export {Database, Batch, Snapshot, Cursor};
 export type {OpenOptions, ReadOptions, WriteOptions} from './types/options';
 export type {ErrorCode, DbError} from './types/errors';
 
