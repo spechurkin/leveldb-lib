@@ -1,0 +1,14 @@
+[package]
+name = "multileveldb"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.70"
+license = "0BSD"
+description = "Binary-safe LevelDB access through the multileveldb C ABI"
+repository = "https://github.com/spechurkin/leveldb-lib"
+readme = "README.md"
+build = "build.rs"
+
+[lib]
+name = "multileveldb"
+path = "src/lib.rs"
