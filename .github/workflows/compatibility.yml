@@ -1,0 +1,329 @@
+name: language-compatibility
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-24.04, windows-2025 ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.15' }
+      - uses: actions/setup-node@v7
+        with: { node-version: '22' }
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Node 22 build inputs
+        id: node
+        run: python tools/node_headers.py
+      - run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DML_BUILD_NODE=ON -DNODE_INCLUDE_DIR="${{ steps.node.outputs.include }}"
+          -DNODE_LIBRARY="${{ steps.node.outputs.library }}"
+      - run: cmake --build build --parallel 4
+      - run: python tools/ci_env.py
+      - run: ctest --test-dir build --output-on-failure
+      - run: cmake --install build --prefix build/install
+      - uses: actions/upload-artifact@v6
+        with:
+          name: compatibility-native-${{ matrix.os }}
+          path: |
+            build/native/*multileveldb*
+            build/bindings/node/*.node
+            build/install/
+
+  python:
+    needs: native
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ '3.11', '3.12', '3.13', '3.14', '3.15' ]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with: { name: compatibility-native-ubuntu-24.04, path: build }
+      - uses: actions/setup-python@v6
+        with: { python-version: '${{ matrix.version }}' }
+      - run: python tools/ci_env.py
+      - name: Install wheel and test installed adapter
+        run: |
+          python -m pip wheel --no-deps ./bindings/python -w build/wheels
+          python -m pip install --no-deps build/wheels/*.whl
+          python -m unittest discover -s bindings/python/tests -v
+
+  node:
+    needs: native
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ '22', '24', '26' ]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with: { name: compatibility-native-ubuntu-24.04, path: build }
+      - uses: actions/setup-node@v7
+        with: { node-version: '${{ matrix.version }}' }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.15' }
+      - run: python tools/ci_env.py
+      - run: npm ci --prefix bindings/node
+      - run: npm test --prefix bindings/node
+      - name: Declarations with matching Node types
+        run: |
+          npm install --prefix bindings/node --no-save --package-lock=false @types/node@${{ matrix.version }}
+          npm run typecheck --prefix bindings/node
+
+  typescript:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ '6.0.3', '7.0.2' ]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with: { node-version: '22' }
+      - run: npm ci --prefix bindings/node
+      - run: npm install --prefix bindings/node --no-save --package-lock=false typescript@${{ matrix.version }} @types/node@22
+      - run: npm run typecheck --prefix bindings/node
+
+  jvm-artifact:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: '25' }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '9.9.1' }
+      - run: gradle -p bindings/jvm jar testClasses runtimeDependencies
+      - uses: actions/upload-artifact@v6
+        with:
+          name: compatibility-jvm
+          path: |
+            bindings/jvm/build/libs/*.jar
+            bindings/jvm/build/classes/java/test/
+            bindings/jvm/build/runtime/
+
+  java:
+    needs: [ native, jvm-artifact ]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ '8', '11', '17', '21', '25', '27' ]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with: { name: compatibility-native-ubuntu-24.04, path: build }
+      - uses: actions/download-artifact@v7
+        with: { name: compatibility-jvm, path: bindings/jvm/build }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.15' }
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: '${{ matrix.version }}' }
+      - run: python tools/ci_env.py
+      - name: Run the same Java 8 JAR on each JVM
+        shell: bash
+        run: |
+          classpath="bindings/jvm/build/libs/multileveldb-1.0.0.jar:bindings/jvm/build/classes/java/test:bindings/jvm/build/runtime/*"
+          flags=()
+          if [ '${{ matrix.version }}' -ge 17 ]; then flags+=(--enable-native-access=ALL-UNNAMED); fi
+          java -ea "${flags[@]}" -cp "$classpath" io.multileveldb.IntegrationTest
+          mkdir -p build/java-example
+          javac -encoding UTF-8 -cp "$classpath" -d build/java-example examples/java/Example.java
+          java "${flags[@]}" -cp "build/java-example:$classpath" Example
+
+  kotlin:
+    needs: [ native, jvm-artifact ]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with: { name: compatibility-native-ubuntu-24.04, path: build }
+      - uses: actions/download-artifact@v7
+        with: { name: compatibility-jvm, path: bindings/jvm/build }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.15' }
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: '25' }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '9.9.1' }
+      - run: python tools/ci_env.py
+      - run: gradle -p examples/kotlin run
+
+  dotnet:
+    needs: native
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ '10', '11' ]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with: { name: compatibility-native-ubuntu-24.04, path: build }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.15' }
+      - uses: actions/setup-dotnet@v5
+        with: { dotnet-version: '${{ matrix.version }}.0.x' }
+      - run: python tools/ci_env.py
+      - run: dotnet run --project tests/dotnet -c Release -p:TestTargetFramework=net${{ matrix.version }}.0
+      - run: dotnet run --project tests/fsharp -c Release -p:TestTargetFramework=net${{ matrix.version }}.0
+
+  framework:
+    needs: native
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with: { name: compatibility-native-windows-2025, path: build }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.15' }
+      - uses: actions/setup-dotnet@v5
+        with: { dotnet-version: '10.0.x' }
+      - run: python tools/ci_env.py
+      - run: dotnet build tests/dotnet -c Release -p:TestTargetFramework=net462
+      - run: dotnet build tests/fsharp -c Release -p:TestTargetFramework=net462
+      - run: |
+          & tests/dotnet/bin/Release/net462/Integration.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & tests/fsharp/bin/Release/net462/Integration.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  ruby:
+    needs: native
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ '3.3', '3.4', '4.0' ]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with: { name: compatibility-native-ubuntu-24.04, path: build }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.15' }
+      - uses: ruby/setup-ruby@v1
+        with: { ruby-version: '${{ matrix.version }}' }
+      - run: python tools/ci_env.py
+      - name: Install gem and test installed adapter
+        run: |
+          (cd bindings/ruby && gem build multileveldb.gemspec -o ../../build/multileveldb.gem)
+          gem install ./build/multileveldb.gem --no-document
+          ruby bindings/ruby/test/database_test.rb
+
+  perl:
+    needs: native
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ '5.40', '5.42', '5.44' ]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with: { name: compatibility-native-ubuntu-24.04, path: build }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.15' }
+      - uses: shogo82148/actions-setup-perl@v1
+        with: { perl-version: '${{ matrix.version }}' }
+      - run: python tools/ci_env.py
+      - run: cpanm --notest FFI::Platypus
+      - working-directory: bindings/perl
+        run: |
+          perl Makefile.PL
+          make test
+
+  go:
+    needs: native
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ '1.26.x', '1.27.x' ]
+    env:
+      CGO_ENABLED: '1'
+      CGO_CFLAGS: '-I${{ github.workspace }}/native/include'
+      CGO_LDFLAGS: '-L${{ github.workspace }}/build/native'
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with: { name: compatibility-native-ubuntu-24.04, path: build }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.15' }
+      - uses: actions/setup-go@v6
+        with: { go-version: '${{ matrix.version }}', cache: false }
+      - run: python tools/ci_env.py
+      - run: go -C bindings/go test ./...
+      - run: go -C bindings/go vet ./...
+
+  rust:
+    needs: native
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ '1.70.0', stable ]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with: { name: compatibility-native-ubuntu-24.04, path: build }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.15' }
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '${{ matrix.version }}' }
+      - run: python tools/ci_env.py
+      - run: cargo test --workspace --locked
+
+  native-standards:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cpp: [ '17', '20', '23' ]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.15' }
+      - run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_CXX_STANDARD=${{ matrix.cpp }} -DCMAKE_CXX_EXTENSIONS=OFF
+      - run: cmake --build build --parallel 4
+      - run: ctest --test-dir build --output-on-failure
+
+  native-consumers:
+    needs: native
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { c: '99', cpp: '11' }
+          - { c: '11', cpp: '14' }
+          - { c: '17', cpp: '17' }
+          - { c: '23', cpp: '20' }
+          - { c: '23', cpp: '23' }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with: { name: compatibility-native-ubuntu-24.04, path: build }
+      - run: >-
+          cmake -S tests/consumer -B build/consumer -G Ninja
+          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/build/install"
+          -DCMAKE_C_STANDARD=${{ matrix.c }} -DCMAKE_C_STANDARD_REQUIRED=ON
+          -DCMAKE_CXX_STANDARD=${{ matrix.cpp }} -DCMAKE_CXX_STANDARD_REQUIRED=ON
+          -DCMAKE_C_EXTENSIONS=OFF -DCMAKE_CXX_EXTENSIONS=OFF
+          -DCMAKE_C_FLAGS=-pedantic-errors -DCMAKE_CXX_FLAGS=-pedantic-errors
+      - run: cmake --build build/consumer
+      - run: ctest --test-dir build/consumer --output-on-failure
+        env: { LD_LIBRARY_PATH: '${{ github.workspace }}/build/install/lib' }
