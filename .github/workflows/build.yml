@@ -51,7 +51,9 @@ jobs:
           "CARGO_TARGET_${{ matrix.arch == 'arm64' && 'AARCH64' || 'X86_64' }}_PC_WINDOWS_MSVC_LINKER=$linker" >> $env:GITHUB_ENV
       - uses: shogo82148/actions-setup-perl@v1
         if: matrix.perl
-        with: { perl-version: '5' }
+        with:
+          distribution: ${{ runner.os == 'Windows' && 'strawberry' || 'default' }}
+          perl-version: ${{ runner.os == 'Windows' && '5.42' || '5' }}
       - name: Node build inputs
         id: node
         run: python tools/node_headers.py
@@ -102,14 +104,17 @@ jobs:
           go -C bindings/go vet ./...
       - name: Perl dependencies
         if: matrix.perl
-        run: cpanm --notest FFI::Platypus
+        run: cpanm --notest ${{ runner.os == 'Windows' && 'FFI::Platypus@2.11' || 'FFI::Platypus' }}
       - name: Perl tests and distribution
         if: matrix.perl
         working-directory: bindings/perl
         run: |
-          perl Makefile.PL
-          perl -MConfig -e 'system($Config{make}, "test") == 0 or die "make test failed"'
-          perl -MConfig -e '$ENV{PATH} .= q(;C:/Program Files/Git/usr/bin) if $^O eq q(MSWin32); system($Config{make}, "dist") == 0 or die "make dist failed"'
+          perl -MConfig -e '
+            system($^X, "Makefile.PL") == 0 or die "Makefile.PL failed\n";
+            system($Config{make}, "test") == 0 or die "make test failed\n";
+            $ENV{PATH} .= q(;C:/Program Files/Git/usr/bin) if $^O eq q(MSWin32);
+            system($Config{make}, "dist") == 0 or die "make dist failed\n";
+          '
       - name: Sequential cross-language integration
         if: matrix.perl
         run: python tests/integration/run.py
