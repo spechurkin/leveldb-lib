@@ -1,0 +1,197 @@
+name: build-and-test
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  platforms:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, platform: linux-x64, arch: x64, perl: true }
+          - { os: ubuntu-24.04-arm, platform: linux-arm64, arch: arm64, perl: false }
+          - { os: windows-2025, platform: win32-x64, arch: x64, perl: true }
+          - { os: windows-11-arm, platform: win32-arm64, arch: arm64, perl: false }
+          - { os: macos-15-intel, platform: darwin-x64, arch: x64, perl: true }
+          - { os: macos-15, platform: darwin-arm64, arch: arm64, perl: true }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.14' }
+      - uses: actions/setup-node@v7
+        with: { node-version: '26' }
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: '25', architecture: '${{ matrix.arch }}' }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '9.9.1' }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-dotnet@v5
+        with: { dotnet-version: '10.0.x' }
+      - uses: actions/setup-go@v6
+        if: runner.os != 'Windows'
+        with: { go-version: '1.27.4', cache: false }
+      - uses: ruby/setup-ruby@v1
+        if: matrix.perl
+        with: { ruby-version: '4.0' }
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with: { arch: '${{ matrix.arch }}' }
+      - uses: shogo82148/actions-setup-perl@v1
+        if: matrix.perl
+        with: { perl-version: '5' }
+      - name: Node build inputs
+        id: node
+        run: python tools/node_headers.py
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DML_BUILD_NODE=ON -DNODE_INCLUDE_DIR="${{ steps.node.outputs.include }}"
+          -DNODE_LIBRARY="${{ steps.node.outputs.library }}"
+      - run: cmake --build build --parallel 4
+      - run: python tools/ci_env.py
+      - name: Configure cgo
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          echo "CGO_ENABLED=1" >> "$GITHUB_ENV"
+          echo "CGO_CFLAGS=-I${GITHUB_WORKSPACE}/native/include" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=-L${GITHUB_WORKSPACE}/build/native" >> "$GITHUB_ENV"
+      - run: ctest --test-dir build --output-on-failure
+      - run: cargo test --workspace --locked
+      - run: cargo package -p multileveldb --allow-dirty --locked
+      - run: npm ci --prefix bindings/node
+      - run: npm test --prefix bindings/node
+      - run: npm run typecheck --prefix bindings/node
+      - run: gradle -p bindings/jvm build publish
+      - name: Python tests and wheel
+        shell: bash
+        run: |
+          PYTHONPATH=bindings/python python -m unittest discover -s bindings/python/tests -v
+          python -m pip wheel --no-deps ./bindings/python -w build/packages
+      - name: C# and F# tests and NuGet package
+        run: |
+          dotnet run --project tests/dotnet -c Release
+          dotnet run --project tests/fsharp -c Release
+          dotnet pack bindings/dotnet -c Release -o build/packages
+      - name: Ruby tests and gem
+        if: matrix.perl
+        shell: bash
+        run: |
+          gem install fiddle --no-document
+          ruby -I bindings/ruby/lib bindings/ruby/test/database_test.rb
+          cd bindings/ruby
+          gem build multileveldb.gemspec
+      - name: Go tests and vet
+        if: runner.os != 'Windows'
+        run: |
+          go -C bindings/go test ./...
+          go -C bindings/go vet ./...
+      - name: Perl dependencies
+        if: matrix.perl
+        run: cpanm --notest FFI::Platypus
+      - name: Perl tests and distribution
+        if: matrix.perl
+        working-directory: bindings/perl
+        run: |
+          perl Makefile.PL
+          perl -MConfig -e 'system($Config{make}, "test") == 0 or die "make test failed"'
+          perl -MConfig -e 'system($Config{make}, "dist") == 0 or die "make dist failed"'
+      - name: Sequential cross-language integration
+        if: matrix.perl
+        run: python tests/integration/run.py
+        env:
+          ML_SKIP_GO: '${{ runner.os == ''Windows'' && ''1'' || ''0'' }}'
+      - run: python tests/abi/check_exports.py
+      - run: cmake --install build --prefix build/install
+      - name: Installed C and C++ consumers
+        run: |
+          cmake -S tests/consumer -B build/consumer -G Ninja -DCMAKE_PREFIX_PATH="${{ github.workspace }}/build/install"
+          cmake --build build/consumer
+      - name: Native archive
+        working-directory: build
+        run: cpack -G ZIP
+      - run: python tools/package_node.py
+      - name: Node package
+        working-directory: bindings/node
+        run: npm pack
+      - uses: actions/upload-artifact@v6
+        with:
+          name: multileveldb-${{ matrix.platform }}
+          path: |
+            build/multileveldb-*.zip
+            target/package/*.crate
+            bindings/node/multileveldb-*.tgz
+            bindings/node/prebuilds/
+            bindings/jvm/build/libs/*.jar
+            bindings/jvm/build/repository/
+            bindings/perl/MultiLevelDB-*.tar.gz
+            build/packages/
+            bindings/ruby/*.gem
+  sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - run: >-
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+      - run: cmake --build build --parallel 4
+      - run: ctest --test-dir build --output-on-failure -E '^(process_lock|python_binding)$'
+        env: { ASAN_OPTIONS: 'detect_leaks=1' }
+  documentation:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with: { node-version: '26' }
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: '25' }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '9.9.1' }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.14' }
+      - uses: actions/setup-dotnet@v5
+        with: { dotnet-version: '10.0.x' }
+      - uses: actions/setup-go@v6
+        with: { go-version: '1.27.4', cache: false }
+      - uses: ruby/setup-ruby@v1
+        with: { ruby-version: '4.0' }
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y doxygen
+          mkdir -p build/docs/c build/docs/perl
+      - run: doxygen native/Doxyfile
+      - run: cargo doc --workspace --no-deps
+        env: { RUSTDOCFLAGS: '-D warnings' }
+      - run: gradle -p bindings/jvm javadoc javadocJar
+      - run: npm ci --prefix bindings/node
+      - run: npm run docs --prefix bindings/node
+      - run: npm run typecheck --prefix bindings/node
+      - run: node tools/check_node_docs.cjs
+      - name: New language references
+        shell: bash
+        run: |
+          dotnet build bindings/dotnet -c Release
+          mkdir -p build/docs/dotnet build/docs/python build/docs/go
+          cp bindings/dotnet/bin/Release/net10.0/MultiLevelDB.xml build/docs/dotnet/
+          (cd build/docs/python && PYTHONPATH="$GITHUB_WORKSPACE/bindings/python" python -m pydoc -w multileveldb)
+          gem install rdoc --no-document
+          rdoc --op build/docs/ruby bindings/ruby/lib bindings/ruby/README.md
+          CGO_CFLAGS="-I$GITHUB_WORKSPACE/native/include" go -C bindings/go doc -all . > build/docs/go/reference.txt
+          CGO_CFLAGS="-I$GITHUB_WORKSPACE/native/include" go -C bindings/go doc -all ./internal/database > build/docs/go/database.txt
+          go -C bindings/go doc -all ./internal/options > build/docs/go/options.txt
+          go -C bindings/go doc -all ./internal/errors > build/docs/go/errors.txt
+      - run: perl -MPod::Checker -e 'exit podchecker($ARGV[0])' bindings/perl/lib/MultiLevelDB.pm
+      - run: perl -MPod::Simple::HTML -e 'my $p=Pod::Simple::HTML->new; $p->output_fh(*STDOUT); $p->parse_file($ARGV[0])' bindings/perl/lib/MultiLevelDB.pm > build/docs/perl/MultiLevelDB.html
+      - uses: actions/upload-artifact@v6
+        with:
+          name: api-reference
+          path: |
+            build/docs/
+            target/doc/
+            bindings/jvm/build/docs/javadoc/
