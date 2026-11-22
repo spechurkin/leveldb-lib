@@ -153,8 +153,9 @@ The packaging helper stages the addon, shared library and license notices under
 `prebuilds/<platform>-<arch>`. Collect all six platform directories in one package
 before a universal npm release. Keep the companion library adjacent to the addon.
 Platform C/C++ runtime dependencies must also be available: system libc/libstdc++
-on Linux, the Apple runtime on macOS, MSVC redistributables for MSVC Windows
-builds, and matching GCC runtime DLLs for MinGW development builds.
+on Linux, the Apple runtime on macOS, and matching GCC runtime DLLs for MinGW
+development builds. MSVC builds link the runtime statically by default. If you
+select a dynamic `CMAKE_MSVC_RUNTIME_LIBRARY`, install the matching MSVC redistributable.
 
 ## Perl
 
