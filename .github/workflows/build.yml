@@ -43,6 +43,12 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
         with: { arch: '${{ matrix.arch }}' }
+      - name: Select the Rust linker on Windows
+        if: runner.os == 'Windows'
+        run: |
+          $compiler = (Get-Command cl.exe -CommandType Application -ErrorAction Stop).Source
+          $linker = (Resolve-Path -LiteralPath (Join-Path (Split-Path -Parent $compiler) 'link.exe') -ErrorAction Stop).Path
+          "CARGO_TARGET_${{ matrix.arch == 'arm64' && 'AARCH64' || 'X86_64' }}_PC_WINDOWS_MSVC_LINKER=$linker" >> $env:GITHUB_ENV
       - uses: shogo82148/actions-setup-perl@v1
         if: matrix.perl
         with: { perl-version: '5' }
