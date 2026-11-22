@@ -1,0 +1,18 @@
+{
+  "source": {
+    "include": [
+      "src"
+    ],
+    "includePattern": ".+\\.cjs$"
+  },
+  "opts": {
+    "destination": "../../build/docs/node",
+    "encoding": "utf8",
+    "recurse": true
+  },
+  "templates": {
+    "default": {
+      "includeDate": false
+    }
+  }
+}

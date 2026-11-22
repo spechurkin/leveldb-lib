@@ -1,0 +1,44 @@
+{
+  "name": "multileveldb",
+  "version": "1.0.0",
+  "description": "Binary-safe asynchronous LevelDB bindings through Node-API",
+  "license": "0BSD",
+  "homepage": "https://github.com/spechurkin/leveldb-lib/tree/HEAD/bindings/node",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/spechurkin/leveldb-lib.git",
+    "directory": "bindings/node"
+  },
+  "bugs": "https://github.com/spechurkin/leveldb-lib/issues",
+  "main": "src/index.cjs",
+  "types": "src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.mjs",
+      "require": "./src/index.cjs"
+    }
+  },
+  "files": [
+    "src/**/*.cjs",
+    "src/**/*.mjs",
+    "src/**/*.d.ts",
+    "prebuilds",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.cjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "docs": "jsdoc -c jsdoc.json"
+  },
+  "devDependencies": {
+    "@babel/parser": "7.29.14",
+    "@types/node": "26.6.6",
+    "jsdoc": "4.0.5",
+    "typescript": "7.0.2"
+  }
+}
