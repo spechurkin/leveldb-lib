@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net462;net10.0</TargetFrameworks>
+    <AssemblyName Condition="'$(TargetFramework)' == 'net462'">MultiLevelDB.Managed</AssemblyName>
+    <LangVersion>8.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <PackageId>MultiLevelDB</PackageId>
+    <Version>1.0.0</Version>
+    <Description>Binary-safe LevelDB access for C# and F# through the MultiLevelDB C ABI.</Description>
+    <PackageLicenseExpression>0BSD</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/spechurkin/leveldb-lib</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/spechurkin/leveldb-lib</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
+    <None Include="LICENSE" Pack="true" PackagePath="/" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net462'">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+</Project>
