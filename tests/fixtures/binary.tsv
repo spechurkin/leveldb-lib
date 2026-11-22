@@ -1,0 +1,5 @@
+# Hex-encoded key and value; - means an empty byte sequence.
+-	-
+00ff01	0080ff00
+616263	68656c6c6f
+ff0080	ff0001027f80
