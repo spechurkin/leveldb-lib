@@ -1,0 +1,523 @@
+name: release-github-packages
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build, verify, and stage packages without uploading to GitHub Packages/Releases'
+        type: boolean
+        required: true
+        default: true
+      version:
+        description: 'Expected SemVer when running manually (defaults to manifest version)'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      dry_run: ${{ steps.mode.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Determine release mode
+        id: mode
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_DRY_RUN" = "true" ]; then
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Verify release version across all language manifests
+        id: check
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          args=()
+          if [ "$EVENT_NAME" = "push" ]; then
+            args+=(--tag "$REF_NAME")
+          elif [ -n "$INPUT_VERSION" ]; then
+            args+=(--expected "$INPUT_VERSION")
+          fi
+          python tools/check_release_version.py "${args[@]}"
+
+  build-native:
+    needs: verify-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, platform: linux-x64, arch: x64, ext: tar.gz, cpack: TGZ }
+          - { os: ubuntu-24.04-arm, platform: linux-arm64, arch: arm64, ext: tar.gz, cpack: TGZ }
+          - { os: windows-2025, platform: win32-x64, arch: x64, ext: zip, cpack: ZIP }
+          - { os: windows-11-arm, platform: win32-arm64, arch: arm64, ext: zip, cpack: ZIP }
+          - { os: macos-15-intel, platform: darwin-x64, arch: x64, ext: tar.gz, cpack: TGZ }
+          - { os: macos-15, platform: darwin-arm64, arch: arm64, ext: tar.gz, cpack: TGZ }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: ${{ matrix.arch }}
+      - name: Node-API 8 headers
+        id: node
+        run: python tools/node_headers.py
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DML_BUILD_NODE=ON -DNODE_INCLUDE_DIR="${{ steps.node.outputs.include }}"
+          -DNODE_LIBRARY="${{ steps.node.outputs.library }}"
+      - name: Build
+        run: cmake --build build --parallel 4
+      - run: python tools/ci_env.py
+      - name: Native & ABI tests
+        run: |
+          ctest --test-dir build --output-on-failure
+          python tests/abi/check_exports.py
+      - name: Package native archive
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify-version.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+          CPACK_GEN: ${{ matrix.cpack }}
+          EXT: ${{ matrix.ext }}
+        run: |
+          mkdir -p dist
+          (cd build && cpack -G "$CPACK_GEN")
+          archive=$(find build -maxdepth 1 -type f \( -name "multileveldb-${VERSION}-*.zip" -o -name "multileveldb-${VERSION}-*.tar.gz" \) | head -n 1)
+          test -n "$archive"
+          cp "$archive" "dist/multileveldb-${VERSION}-${PLATFORM}.${EXT}"
+      - name: Stage Node prebuild
+        run: python tools/package_node.py
+      - uses: actions/upload-artifact@v6
+        with:
+          name: native-archive-${{ matrix.platform }}
+          path: dist/multileveldb-*
+      - uses: actions/upload-artifact@v6
+        with:
+          name: node-prebuild-${{ matrix.platform }}
+          path: bindings/node/prebuilds/${{ matrix.platform }}/
+      - uses: actions/upload-artifact@v6
+        if: matrix.platform == 'linux-x64'
+        with:
+          name: native-linux-x64
+          path: build/native/*multileveldb*
+
+  publish-maven-ghp:
+    needs: [ verify-version, build-native ]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: native-linux-x64
+          path: build/native
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - run: python tools/ci_env.py
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.9.1'
+      - name: Build, test, and stage Maven artifacts
+        env:
+          ML_REPO_URL: https://github.com/${{ github.repository }}
+        run: gradle -p bindings/jvm clean build publishLibraryPublicationToStagingRepository
+      - uses: actions/upload-artifact@v6
+        if: needs.verify-version.outputs.dry_run == 'true'
+        with:
+          name: maven-ghp-jars
+          path: bindings/jvm/build/libs/*.jar
+      - name: Publish Maven package to GitHub Packages
+        if: needs.verify-version.outputs.dry_run != 'true'
+        env:
+          ML_PUBLISH_GITHUB_PACKAGES: 'true'
+          ML_REPO_URL: https://github.com/${{ github.repository }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gradle -p bindings/jvm publishLibraryPublicationToGitHubPackagesRepository
+
+  publish-npm-ghp:
+    needs: [ verify-version, build-native ]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+      - uses: actions/download-artifact@v7
+        with:
+          name: node-prebuild-linux-x64
+          path: bindings/node/prebuilds/linux-x64
+      - uses: actions/download-artifact@v7
+        with:
+          name: node-prebuild-linux-arm64
+          path: bindings/node/prebuilds/linux-arm64
+      - uses: actions/download-artifact@v7
+        with:
+          name: node-prebuild-win32-x64
+          path: bindings/node/prebuilds/win32-x64
+      - uses: actions/download-artifact@v7
+        with:
+          name: node-prebuild-win32-arm64
+          path: bindings/node/prebuilds/win32-arm64
+      - uses: actions/download-artifact@v7
+        with:
+          name: node-prebuild-darwin-x64
+          path: bindings/node/prebuilds/darwin-x64
+      - uses: actions/download-artifact@v7
+        with:
+          name: node-prebuild-darwin-arm64
+          path: bindings/node/prebuilds/darwin-arm64
+      - name: Verify prebuilds, run tests, and stage scoped GitHub Packages bundle
+        shell: bash
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.repository }}
+        run: |
+          for p in linux-x64 linux-arm64 win32-x64 win32-arm64 darwin-x64 darwin-arm64; do
+            test -f "bindings/node/prebuilds/${p}/multileveldb.node"
+          done
+          npm ci --prefix bindings/node
+          npm test --prefix bindings/node
+          npm run typecheck --prefix bindings/node
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+
+          src = Path("bindings/node")
+          dst = Path("dist/npm-ghp")
+          if dst.exists():
+              shutil.rmtree(dst)
+          shutil.copytree(src, dst, ignore=shutil.ignore_patterns("node_modules", "test", "*.tgz"))
+          owner = os.environ["OWNER"].lower()
+          repo = os.environ["REPO"]
+          pkg_path = dst / "package.json"
+          pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+          pkg["name"] = f"@{owner}/multileveldb"
+          pkg["publishConfig"] = {"registry": "https://npm.pkg.github.com/"}
+          pkg["repository"]["url"] = f"git+https://github.com/{repo}.git"
+          pkg_path.write_text(json.dumps(pkg, indent=2) + "\n", encoding="utf-8")
+          PY
+          npm pack --dry-run --prefix dist/npm-ghp
+      - name: Pack npm tarball (dry run)
+        if: needs.verify-version.outputs.dry_run == 'true'
+        working-directory: dist/npm-ghp
+        run: npm pack
+      - uses: actions/upload-artifact@v6
+        if: needs.verify-version.outputs.dry_run == 'true'
+        with:
+          name: npm-ghp-package
+          path: dist/npm-ghp/*.tgz
+      - name: Publish npm package to GitHub Packages
+        if: needs.verify-version.outputs.dry_run != 'true'
+        working-directory: dist/npm-ghp
+        shell: bash
+        env:
+          OWNER: ${{ github.repository_owner }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          scope="@${OWNER,,}"
+          printf '%s:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}\n' "$scope" > .npmrc
+          npm publish
+
+  publish-nuget-ghp:
+    needs: [ verify-version, build-native ]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: native-linux-x64
+          path: build/native
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - run: python tools/ci_env.py
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Test C#/F# and pack NuGet
+        run: |
+          dotnet run --project tests/dotnet -c Release
+          dotnet run --project tests/fsharp -c Release
+          dotnet pack bindings/dotnet -c Release -p:RepositoryUrl="https://github.com/${{ github.repository }}" -o dist
+      - uses: actions/upload-artifact@v6
+        if: needs.verify-version.outputs.dry_run == 'true'
+        with:
+          name: nuget-ghp-package
+          path: dist/*.nupkg
+      - name: Publish NuGet package to GitHub Packages
+        if: needs.verify-version.outputs.dry_run != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+        run: >-
+          dotnet nuget push "dist/*.nupkg"
+          --source "https://nuget.pkg.github.com/${OWNER}/index.json"
+          --api-key "$GITHUB_TOKEN"
+          --skip-duplicate
+
+  publish-rubygems-ghp:
+    needs: [ verify-version, build-native ]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: native-linux-x64
+          path: build/native
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - run: python tools/ci_env.py
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '4.0'
+      - name: Test and build Ruby gem
+        shell: bash
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          gem install fiddle --no-document
+          ruby -I bindings/ruby/lib bindings/ruby/test/database_test.rb
+          (cd bindings/ruby && gem build multileveldb.gemspec)
+      - uses: actions/upload-artifact@v6
+        if: needs.verify-version.outputs.dry_run == 'true'
+        with:
+          name: rubygem-ghp-package
+          path: bindings/ruby/multileveldb-*.gem
+      - name: Publish Ruby gem to GitHub Packages
+        if: needs.verify-version.outputs.dry_run != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify-version.outputs.version }}
+          OWNER: ${{ github.repository_owner }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "$HOME/.gem"
+          printf -- '---\n:github: Bearer %s\n' "$GITHUB_TOKEN" > "$HOME/.gem/credentials"
+          chmod 600 "$HOME/.gem/credentials"
+          gem push --key github --host "https://rubygems.pkg.github.com/${OWNER}" "bindings/ruby/multileveldb-${VERSION}.gem"
+
+  package-crates:
+    needs: [ verify-version, build-native ]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: native-linux-x64
+          path: build/native
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - run: python tools/ci_env.py
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test and package Rust crate
+        run: |
+          cargo test --workspace --locked
+          cargo package -p multileveldb --locked
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-asset-crate
+          path: target/package/*.crate
+
+  package-python:
+    needs: [ verify-version, build-native ]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: native-linux-x64
+          path: build/native
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - run: python tools/ci_env.py
+      - name: Build, check, and test Python wheel + sdist
+        shell: bash
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build ./bindings/python --outdir dist
+          twine check dist/*
+          python -m pip install --no-deps dist/*.whl
+          python -m unittest discover -s bindings/python/tests -v
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-asset-python
+          path: dist/*
+
+  package-perl:
+    needs: [ verify-version, build-native ]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: native-linux-x64
+          path: build/native
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - run: python tools/ci_env.py
+      - uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: '5'
+      - run: cpanm --notest FFI::Platypus
+      - name: Build and test Perl distribution
+        working-directory: bindings/perl
+        run: |
+          perl Makefile.PL
+          make disttest
+          make dist
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-asset-perl
+          path: bindings/perl/MultiLevelDB-*.tar.gz
+
+  publish-github-release:
+    needs: [ verify-version, build-native, package-crates, package-python, package-perl ]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: native-archive-*
+          path: release-assets
+          merge-multiple: true
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: release-asset-*
+          path: release-assets
+          merge-multiple: true
+      - name: Verify release assets and generate SHA256SUMS
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          cd release-assets
+          for p in linux-x64 linux-arm64 win32-x64 win32-arm64 darwin-x64 darwin-arm64; do
+            compgen -G "multileveldb-${VERSION}-${p}.*" > /dev/null
+          done
+          test -f "multileveldb-${VERSION}.crate"
+          test -f "multileveldb-${VERSION}-py3-none-any.whl"
+          test -f "multileveldb-${VERSION}.tar.gz"
+          test -f "MultiLevelDB-${VERSION}.tar.gz"
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - uses: actions/upload-artifact@v6
+        if: needs.verify-version.outputs.dry_run == 'true'
+        with:
+          name: github-release-assets
+          path: release-assets/
+      - name: Attest build provenance
+        if: needs.verify-version.outputs.dry_run != 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release-assets/*
+      - name: Publish GitHub Release
+        if: needs.verify-version.outputs.dry_run != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+
+  publish-go-tag:
+    needs: [ verify-version, build-native ]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v7
+        with:
+          name: native-linux-x64
+          path: build/native
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - run: python tools/ci_env.py
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Test and vet Go module
+        env:
+          CGO_ENABLED: '1'
+          CGO_CFLAGS: -I${{ github.workspace }}/native/include
+          CGO_LDFLAGS: -L${{ github.workspace }}/build/native
+          GOTOOLCHAIN: local
+        run: |
+          go -C bindings/go test ./...
+          go -C bindings/go vet ./...
+      - name: Push Go subdirectory tag
+        if: needs.verify-version.outputs.dry_run != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          go_tag="bindings/go/v${VERSION}"
+          if ! git rev-parse -q --verify "refs/tags/${go_tag}" > /dev/null; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "$go_tag" -m "Go module release v${VERSION}"
+            git push origin "$go_tag"
+          fi
