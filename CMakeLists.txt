@@ -41,6 +41,10 @@ if(BUILD_TESTING)
     add_test(NAME process_lock COMMAND ${CMAKE_COMMAND} -E env
       "MULTILEVELDB_LIBRARY=$<TARGET_FILE:multileveldb>" "ML_TEST_ROOT=${CMAKE_BINARY_DIR}"
       ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/abi/process_lock.py)
+    add_test(NAME python_binding COMMAND ${CMAKE_COMMAND} -E env
+      "MULTILEVELDB_LIBRARY=$<TARGET_FILE:multileveldb>" "ML_TEST_ROOT=${CMAKE_BINARY_DIR}"
+      "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/bindings/python"
+      ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python/tests -v)
   endif()
   add_executable(interop_c tests/integration/verify.c)
   target_link_libraries(interop_c PRIVATE multileveldb)
